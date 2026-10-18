@@ -4413,5 +4413,145 @@ TEST_F(FrameScaleTest, AnisotropicSkin) {
               Pointwise(FloatNear(1e-5), {0, 0, 4, 2, 0, 4}));
 }
 
+// ------------------------- mju_error during compile --------------------------
+
+// mjCModel::Compile turns mju_error into a compile error via longjmp, skipping
+// the destructors of C++ objects on the stack, so errors from bad input must
+// not reach mju_error; the leak checks below come from running under asan
+
+// SDF attribute error in the serial mesh compile path
+TEST_F(UserModelTest, SdfAttributeErrorDoesNotLeak) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <compiler usethread="false"/>
+    <extension>
+      <plugin plugin="mujoco.sdf.torus">
+        <instance name="torus_instance_with_a_long_name_to_defeat_sso">
+          <config key="radius1" value="not_a_number_and_longer_than_sso"/>
+          <config key="radius2" value="0.15"/>
+        </instance>
+      </plugin>
+    </extension>
+    <asset>
+      <mesh name="torus">
+        <plugin instance="torus_instance_with_a_long_name_to_defeat_sso"/>
+      </mesh>
+    </asset>
+  </mujoco>
+  )";
+  std::array<char, 1024> error;
+  MjModelPtr m = LoadModelFromString(xml, error.data(), error.size());
+  EXPECT_THAT(m.get(), IsNull());
+  EXPECT_THAT(error.data(), HasSubstr("invalid attribute value for 'radius1'"));
+}
+
+// an SDF attribute with trailing characters is invalid
+TEST_F(UserModelTest, SdfAttributeTrailingCharacters) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <extension>
+      <plugin plugin="mujoco.sdf.torus">
+        <instance name="torus">
+          <config key="radius1" value="0.35m"/>
+          <config key="radius2" value=" 0.15 "/>
+        </instance>
+      </plugin>
+    </extension>
+    <asset>
+      <mesh name="torus">
+        <plugin instance="torus"/>
+      </mesh>
+    </asset>
+  </mujoco>
+  )";
+  std::array<char, 1024> error;
+  MjModelPtr m = LoadModelFromString(xml, error.data(), error.size());
+  EXPECT_THAT(m.get(), IsNull());
+  EXPECT_THAT(error.data(), HasSubstr("invalid attribute value for 'radius1'"));
+}
+
+// SDF attribute error in the threaded mesh compile path
+TEST_F(UserModelTest, SdfAttributeErrorInWorkerThread) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <extension>
+      <plugin plugin="mujoco.sdf.torus">
+        <instance name="torus">
+          <config key="radius1" value="not_a_number_and_longer_than_sso"/>
+          <config key="radius2" value="0.15"/>
+        </instance>
+      </plugin>
+    </extension>
+    <asset>
+      <mesh name="torus1">
+        <plugin instance="torus"/>
+      </mesh>
+      <mesh name="torus2">
+        <plugin instance="torus"/>
+      </mesh>
+    </asset>
+  </mujoco>
+  )";
+  std::array<char, 1024> error;
+  MjModelPtr m = LoadModelFromString(xml, error.data(), error.size());
+  EXPECT_THAT(m.get(), IsNull());
+  EXPECT_THAT(error.data(), HasSubstr("invalid attribute value for 'radius1'"));
+}
+
+// SDF attribute error in plugin init, for an instance which no mesh uses
+TEST_F(UserModelTest, SdfInitErrorDoesNotLeak) {
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <extension>
+      <plugin plugin="mujoco.sdf.gear">
+        <instance name="gear">
+          <config key="thickness" value="not_a_number_and_longer_than_sso"/>
+        </instance>
+      </plugin>
+    </extension>
+  </mujoco>
+  )";
+  std::array<char, 1024> error;
+  MjModelPtr m = LoadModelFromString(xml, error.data(), error.size());
+  EXPECT_THAT(m.get(), IsNull());
+  EXPECT_THAT(error.data(),
+              HasSubstr("Invalid parameter specification in Gear plugin"));
+}
+
+// ------------- test material textures ----------------------------------------
+
+using MaterialTest = MujocoTest;
+
+// the textures of a material are resolved from the spec: a material which is
+// pointed at another texture compiles once the first texture is deleted
+TEST_F(MaterialTest, TextureFromSpec) {
+  mjSpec* spec = mj_makeSpec();
+  mjsTexture* tex1 = mjs_addTexture(spec);
+  mjsTexture* tex2 = mjs_addTexture(spec);
+  for (mjsTexture* tex : {tex1, tex2}) {
+    tex->type = mjTEXTURE_2D;
+    tex->builtin = mjBUILTIN_CHECKER;
+    tex->width = 8;
+    tex->height = 8;
+  }
+  mjs_setName(tex1->element, "tex1");
+  mjs_setName(tex2->element, "tex2");
+  mjsMaterial* mat = mjs_addMaterial(spec, nullptr);
+  mjs_setName(mat->element, "mat");
+  (*mat->textures)[mjTEXROLE_RGB] = "tex1";
+  mjModel* m = mj_compile(spec, nullptr);
+  ASSERT_THAT(m, NotNull()) << mjs_getError(spec);
+  EXPECT_EQ(m->mat_texid[mjTEXROLE_RGB], 0);
+  mj_deleteModel(m);
+
+  (*mat->textures)[mjTEXROLE_RGB] = "tex2";
+  EXPECT_EQ(mjs_delete(spec, tex1->element), 0) << mjs_getError(spec);
+  m = mj_compile(spec, nullptr);
+  ASSERT_THAT(m, NotNull()) << mjs_getError(spec);
+  EXPECT_EQ(m->ntex, 1);
+  EXPECT_EQ(m->mat_texid[mjTEXROLE_RGB], mj_name2id(m, mjOBJ_TEXTURE, "tex2"));
+  mj_deleteModel(m);
+  mj_deleteSpec(spec);
+}
 }  // namespace
 }  // namespace mujoco
