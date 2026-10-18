@@ -1856,14 +1856,14 @@ void mjr_addAux(int index, int width, int height, int samples, mjrContext* con) 
   }
   glBindFramebuffer(GL_FRAMEBUFFER, con->auxFBO[index]);
 
-  // create color buffer with multisamples
+  // create color buffer (single-sample)
   glGenRenderbuffers(1, con->auxColor + index);
   if (!con->auxColor[index]) {
     mju_error("Could not allocate auxiliary color buffer");
   }
   glBindRenderbuffer(GL_RENDERBUFFER, con->auxColor[index]);
-  glRenderbufferStorageMultisample(GL_RENDERBUFFER, con->auxSamples[index], GL_RGBA8,
-                                   con->auxWidth[index], con->auxHeight[index]);
+  glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8,
+                        con->auxWidth[index], con->auxHeight[index]);
   glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                             GL_RENDERBUFFER, con->auxColor[index]);
 

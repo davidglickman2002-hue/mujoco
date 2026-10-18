@@ -15,8 +15,9 @@
 #include "render/classic/render_gl2.h"
 
 #include <math.h>
-#include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include <mujoco/mjmacro.h>
 #include <mujoco/mujoco.h>
@@ -358,44 +359,56 @@ void mjr_blitAux(int index, mjrRect src, int left, int bottom, const mjrContext*
     mju_error("Invalid aux buffer index");
   }
 
-  // make sure aux buffers is available
+  // make sure aux buffer is available
   if (!con->auxFBO[index]) {
     return;
   }
 
-  // make sure blit is supported
-  if (!glBlitFramebuffer) {
+  // validate src dimensions
+  if (src.width <= 0 || src.height <= 0) {
     return;
   }
 
-  // resolve blit
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, con->auxFBO[index]);
-  glReadBuffer(GL_COLOR_ATTACHMENT0);
-  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, con->auxFBO_r[index]);
-  glDrawBuffer(GL_COLOR_ATTACHMENT0);
-  glBlitFramebuffer(src.left, src.bottom, src.left+src.width, src.bottom+src.height,
-                    src.left, src.bottom, src.left+src.width, src.bottom+src.height,
-                    GL_COLOR_BUFFER_BIT, GL_NEAREST);
-
-  // set source
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, con->auxFBO_r[index]);
-  glReadBuffer(GL_COLOR_ATTACHMENT0);
-
-  // set destination
-  if (con->currentBuffer == mjFB_WINDOW) {
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-    glDrawBuffer(con->windowDoublebuffer ? GL_BACK : GL_FRONT);
-  } else {
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, con->offFBO);
-    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+  // allocate temporary buffer
+  unsigned char* pixel_buf = (unsigned char*)malloc((size_t)src.width * src.height * 4);
+  if (!pixel_buf) {
+    mju_warning("mjr_blitAux: memory allocation failed");
+    return;
   }
 
-  // blit
-  glBlitFramebuffer(src.left, src.bottom, src.left+src.width, src.bottom+src.height,
-                    left, bottom, left+src.width, bottom+src.height,
-                    GL_COLOR_BUFFER_BIT, GL_NEAREST);
+  // save and set pixel pack/unpack state
+  glPushClientAttrib(GL_CLIENT_PIXEL_STORE_BIT);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 
-  // restore
+  // read pixels from aux buffer
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, con->auxFBO[index]);
+  glReadBuffer(GL_COLOR_ATTACHMENT0);
+  glReadPixels(src.left, src.bottom, src.width, src.height, GL_RGBA, GL_UNSIGNED_BYTE, pixel_buf);
+
+  // restore target draw framebuffer
+  mjr_restoreBuffer(con);
+
+  // save attribute state and disable pipeline stages that could interfere with drawing
+  glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT | GL_PIXEL_MODE_BIT);
+  glDisable(GL_SCISSOR_TEST);
+  glDisable(GL_DEPTH_TEST);
+  glDisable(GL_LIGHTING);
+  glDisable(GL_TEXTURE_2D);
+  glDisable(GL_BLEND);
+
+  // position raster at destination and draw pixels
+  glWindowPos2i(left, bottom);
+  glDrawPixels(src.width, src.height, GL_RGBA, GL_UNSIGNED_BYTE, pixel_buf);
+
+  // restore state and clean up
+  glPopAttrib();
+  glPopClientAttrib();
+  free(pixel_buf);
+
+  // restore buffer state
   mjr_restoreBuffer(con);
 }
 
